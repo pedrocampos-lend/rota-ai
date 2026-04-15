@@ -90,6 +90,22 @@ interface UseGeminiOptions {
   onUpdate: (messages: Message[], itinerary: Itinerary | null) => void
 }
 
+/** Fetch API key from server (runtime) with fallback to build-time env var */
+async function resolveApiKey(): Promise<string> {
+  // Try runtime endpoint first (Railway / production)
+  try {
+    const res = await fetch('/api/config')
+    if (res.ok) {
+      const data = await res.json() as { geminiApiKey?: string }
+      if (data.geminiApiKey) return data.geminiApiKey
+    }
+  } catch {
+    // offline or dev without server — fall through
+  }
+  // Fallback: build-time env var (local dev)
+  return (import.meta.env.VITE_GEMINI_API_KEY as string) ?? ''
+}
+
 export function useGemini({ session, onUpdate }: UseGeminiOptions) {
   const [messages, setMessages] = useState<Message[]>(session.messages)
   const [isLoading, setIsLoading] = useState(false)
@@ -100,12 +116,18 @@ export function useGemini({ session, onUpdate }: UseGeminiOptions) {
   const chatRef = useRef<ReturnType<
     ReturnType<GoogleGenerativeAI['getGenerativeModel']>['startChat']
   > | null>(null)
+  const apiKeyRef = useRef<string>('')
 
   // Refs so effects can read latest values without stale closures
   const sessionRef = useRef(session)
   sessionRef.current = session
   const onUpdateRef = useRef(onUpdate)
   onUpdateRef.current = onUpdate
+
+  // Resolve API key once on mount
+  useEffect(() => {
+    resolveApiKey().then((key) => { apiKeyRef.current = key })
+  }, [])
 
   // When the session switches, reset local state and force chat re-init
   useEffect(() => {
@@ -116,7 +138,7 @@ export function useGemini({ session, onUpdate }: UseGeminiOptions) {
   }, [session.id]) // only fires when session ID changes
 
   const initChat = useCallback((history: Message[]) => {
-    const apiKey = import.meta.env.VITE_GEMINI_API_KEY as string
+    const apiKey = apiKeyRef.current
     if (!apiKey || apiKey === 'your_gemini_api_key_here') return null
 
     const genAI = new GoogleGenerativeAI(apiKey)
@@ -155,7 +177,11 @@ export function useGemini({ session, onUpdate }: UseGeminiOptions) {
       setIsLoading(true)
 
       try {
-        const apiKey = import.meta.env.VITE_GEMINI_API_KEY as string
+        // Ensure key is resolved (may still be fetching on first send)
+        if (!apiKeyRef.current) {
+          apiKeyRef.current = await resolveApiKey()
+        }
+        const apiKey = apiKeyRef.current
         if (!apiKey || apiKey === 'your_gemini_api_key_here') {
           setMessages((prev) =>
             prev.map((m) =>
